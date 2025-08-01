@@ -6,12 +6,18 @@ import os
 from datetime import datetime
 import locale
 import time
+import pytz # Nueva librería para manejar zonas horarias
 from keep_alive import keep_alive # Para mantenerlo activo en Replit
 
 # --- CONFIGURACIÓN ---
 TOKEN = os.environ['DISCORD_TOKEN'] 
-CHANNEL_ID = 1400472034374324335   # Reemplaza con el ID del canal donde se enviarán las notificaciones
+CHANNEL_ID = 1400472034374324335   # Tu ID de canal
 URL = "https://altertime.es/feed?rss" 
+
+# --- NUEVO: CONFIGURACIÓN DE HORARIO ---
+ZONA_HORARIA = pytz.timezone('Europe/Madrid')
+HORA_INICIO = 9  # 9 AM
+HORA_FIN = 3     # 3 AM
 
 # --- VARIABLES GLOBALES ---
 urls_noticias_enviadas = set()
@@ -34,7 +40,6 @@ def extraer_noticias():
     y extrae una lista de las noticias más recientes.
     """
     try:
-        # Añadimos un parámetro extra a la URL para evitar la caché y obtener siempre la versión más reciente.
         url_cache_bust = f"{URL}&_={int(time.time())}"
         response = requests.get(url_cache_bust, headers={'User-Agent': 'Mozilla/5.0'})
         response.raise_for_status()
@@ -42,40 +47,55 @@ def extraer_noticias():
 
         lista_de_noticias = []
 
-        contenedores = soup.find_all('item', limit=10)
+        contenedores = soup.find_all('item', limit=3)
 
         for item in contenedores:
             titulo_tag = item.find('title')
             enlace_tag = item.find('link')
-            descripcion_tag = item.find('description')
-            
-            # Validar que los elementos esenciales existan
-            if not titulo_tag or not enlace_tag or not descripcion_tag:
-                continue  # Saltar este item si faltan elementos esenciales
-                
+
+            if not titulo_tag or not enlace_tag:
+                continue
+
             titulo = titulo_tag.text
             enlace = enlace_tag.text
 
-            descripcion_html = descripcion_tag.text
+            descripcion_html_tag = item.find('description')
+            descripcion_html = descripcion_html_tag.text if descripcion_html_tag else ""
             descripcion_soup = BeautifulSoup(descripcion_html, 'html.parser')
             descripcion = descripcion_soup.get_text(strip=True)
 
-            imagen_tag = descripcion_soup.find('img')
-            imagen_url = imagen_tag['src'] if imagen_tag else None
+            # --- MEJORA EN LA EXTRACCIÓN DE IMAGEN (3 MÉTODOS) ---
+            imagen_url = None
+            # Método 1: Buscar imagen dentro de la descripción
+            imagen_tag_desc = descripcion_soup.find('img')
+            if imagen_tag_desc and imagen_tag_desc.has_attr('src'):
+                imagen_url = imagen_tag_desc['src']
+
+            # Método 2: Buscar en la etiqueta <media:content>
+            if not imagen_url:
+                media_content_tag = item.find('media:content')
+                if media_content_tag and media_content_tag.has_attr('url'):
+                    imagen_url = media_content_tag['url']
+
+            # Método 3: Buscar en la etiqueta <enclosure> (muy común en RSS)
+            if not imagen_url:
+                enclosure_tag = item.find('enclosure')
+                if enclosure_tag and enclosure_tag.has_attr('url') and 'image' in enclosure_tag.get('type', ''):
+                    imagen_url = enclosure_tag['url']
+
 
             fecha_str = "Fecha no disponible"
             pub_date_tag = item.find('pubDate')
             if pub_date_tag:
                 try:
-                    # CORRECCIÓN: El formato de fecha en este feed usa 'GMT' en lugar de un offset numérico.
-                    # Lo manejamos como un texto literal en el formato.
                     dt_objeto = datetime.strptime(pub_date_tag.text, '%a, %d %b %Y %H:%M:%S GMT')
-                    # Formateamos la fecha a un formato más legible en español
                     fecha_str = dt_objeto.strftime('%d de %B de %Y')
                 except ValueError:
-                    # Si el formato anterior falla, intentamos con el formato con offset por si cambia.
-                    dt_objeto = datetime.strptime(pub_date_tag.text, '%a, %d %b %Y %H:%M:%S %z')
-                    fecha_str = dt_objeto.strftime('%d de %B de %Y')
+                    try:
+                        dt_objeto = datetime.strptime(pub_date_tag.text, '%a, %d %b %Y %H:%M:%S %z')
+                        fecha_str = dt_objeto.strftime('%d de %B de %Y')
+                    except ValueError:
+                        print(f"No se pudo procesar la fecha: {pub_date_tag.text}")
 
 
             lista_de_noticias.append({
@@ -83,7 +103,7 @@ def extraer_noticias():
                 'enlace': enlace,
                 'descripcion': descripcion,
                 'imagen_url': imagen_url,
-                'fecha': fecha_str # Añadimos la fecha al diccionario
+                'fecha': fecha_str
             })
 
         return lista_de_noticias
@@ -99,8 +119,13 @@ def extraer_noticias():
 @tasks.loop(hours=1)
 async def revisar_pagina_periodicamente():
     """Tarea en bucle que revisa la página y envía notificaciones si hay algo nuevo."""
+    hora_actual = datetime.now(ZONA_HORARIA).hour
+    if not (hora_actual >= HORA_INICIO or hora_actual < HORA_FIN):
+        print(f"Hora actual ({hora_actual}:00 en Madrid) fuera del rango activo ({HORA_INICIO}:00 - {HORA_FIN}:00). Saltando revisión.")
+        return
+
     global urls_noticias_enviadas
-    print("Revisando el feed en busca de nuevas noticias...")
+    print("Revisando el feed en busca de nuevas noticias (dentro del horario activo)...")
 
     noticias_actuales = extraer_noticias()
     if not noticias_actuales:
@@ -146,8 +171,8 @@ async def on_ready():
 
 @bot.command()
 async def probar(ctx):
-    """Extrae y muestra las 5 noticias más recientes de la página."""
-    await ctx.send("Analizando el feed y extrayendo las últimas 5 noticias...")
+    """Extrae y muestra las 3 noticias más recientes de la página."""
+    await ctx.send("Analizando el feed y extrayendo las últimas 3 noticias...")
 
     noticias = extraer_noticias()
 
@@ -155,8 +180,8 @@ async def probar(ctx):
         await ctx.send("No se pudieron extraer noticias. Revisa la consola de Replit en busca de errores.")
         return
 
-    await ctx.send(f"Se han encontrado {len(noticias)} noticias. Mostrando las 5 más recientes:")
-    for noticia in noticias[:5]:
+    await ctx.send(f"Se han encontrado {len(noticias)} noticias. Mostrando las más recientes:")
+    for noticia in noticias[:3]:
         embed = discord.Embed(
             title=noticia['titulo'],
             url=noticia['enlace'],
