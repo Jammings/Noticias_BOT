@@ -45,10 +45,18 @@ def extraer_noticias():
         contenedores = soup.find_all('item', limit=10)
 
         for item in contenedores:
-            titulo = item.find('title').text
-            enlace = item.find('link').text
+            titulo_tag = item.find('title')
+            enlace_tag = item.find('link')
+            descripcion_tag = item.find('description')
+            
+            # Validar que los elementos esenciales existan
+            if not titulo_tag or not enlace_tag or not descripcion_tag:
+                continue  # Saltar este item si faltan elementos esenciales
+                
+            titulo = titulo_tag.text
+            enlace = enlace_tag.text
 
-            descripcion_html = item.find('description').text
+            descripcion_html = descripcion_tag.text
             descripcion_soup = BeautifulSoup(descripcion_html, 'html.parser')
             descripcion = descripcion_soup.get_text(strip=True)
 
